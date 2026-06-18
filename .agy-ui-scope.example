@@ -1,0 +1,278 @@
+# .agy-ui-scope — scope config for the agy-ui-mcp server.
+#
+# Copy this file to `.agy-ui-scope` in your project root and adjust the globs
+# for your stack. The server reads it to build the policy that constrains the
+# Gemini agent to FRONTEND/UI files only — backend, API, and server code are
+# always denied.
+#
+# Glob semantics (gitignore-style, via pathspec):
+#   - Patterns are matched against paths relative to the project root.
+#   - `allow`     : files the agent may freely edit/create.
+#   - `deny`      : files the agent must never touch (wins over allow).
+#   - `ambiguous` : files that require human confirmation (ask_user/escalate).
+#
+# Precedence in classify_path(): deny > ambiguous > allow > (default deny).
+
+# Fixed model. Do not change unless you know the SDK supports the target.
+model: "gemini-3.5-flash"
+
+# Capture platform. The default `web` and the mobile web-targets
+# (expo-web / flutter-web / ionic) all serve over HTTP and are screenshotted by
+# the same Playwright pipeline — they differ only in serve.cmd/url and the style
+# globs you allow below, not in how the shot is taken. The native platforms
+# (ios-sim / android-emu) capture a real simulator/emulator via dedicated
+# adapters (xcrun simctl / adb) and run in place with PTY hot-reload (see below).
+#   one of: web | expo-web | flutter-web | ionic | ios-sim | android-emu
+platform: web
+
+# --- Mobile-app web-target examples (commented) -----------------------------
+# Each block below is a drop-in replacement for the `platform`/`allow`/`serve`
+# settings, tuned for one mobile framework's web build. Pick one, copy its
+# platform + serve + allow globs over the defaults, and adjust paths.
+#
+# Ionic (Angular/React/Vue) — `ionic serve` builds a normal web app on :8100.
+#   platform: ionic
+#   serve:
+#     cmd: "ionic serve"
+#     url: "http://localhost:8100"
+#     ready_timeout: 60
+#   allow:
+#     - "src/**/*.scss"          # Ionic component/page styles
+#     - "src/**/*.html"          # Ionic page templates
+#     - "src/**/*.css"
+#
+# Expo / React Native — `expo start --web` runs react-native-web (StyleSheet
+# objects live inline in the .tsx/.jsx, so allow those). Default web port is
+# 19006 on older SDKs; newer Metro web serves on 8081 — match your CLI output.
+#   platform: expo-web
+#   serve:
+#     cmd: "npx expo start --web"
+#     url: "http://localhost:19006"   # or http://localhost:8081
+#     ready_timeout: 60
+#   allow:
+#     - "**/*.tsx"               # StyleSheet.create(...) lives here
+#     - "**/*.jsx"
+#     - "app/**/*.tsx"           # expo-router screens
+#
+# Flutter web — `flutter run -d web-server` serves the compiled app. Styling is
+# Dart widget code (no CSS), so allow lib/**/*.dart. NOTE: the default CanvasKit
+# renderer paints into a <canvas>, so there is no DOM to target — avoid
+# selector-based pre_steps for Flutter web targets (they will not match).
+#   platform: flutter-web
+#   serve:
+#     cmd: "flutter run -d web-server --web-port 5000"
+#     url: "http://localhost:5000"
+#     ready_timeout: 120
+#   allow:
+#     - "lib/**/*.dart"          # widgets/themes; no CSS in Flutter
+#
+# Flutter web (non-HMR rebuild pattern) — `flutter run -d web-server` does NOT
+# hot-reload a headless browser, so each edit needs an explicit rebuild before
+# the next screenshot. Instead, serve the compiled `build/web` with a plain
+# static server and set `reload_cmd` to rebuild after every edit. The server
+# (`reload_cmd`) runs in the worktree cwd: the orchestrator builds once before
+# the first shot, then re-runs it after each diff-gated edit so screenshots
+# reflect the change. This is the general pattern for any framework that lacks
+# headless HMR (compile-to-static toolchains) — Vite-style HMR servers leave
+# `reload_cmd` unset.
+#   platform: flutter-web
+#   serve:
+#     cmd: "python3 -m http.server 5000 --directory build/web"
+#     url: "http://localhost:5000/"
+#     ready_timeout: 120
+#     reload_cmd: "flutter build web"   # rebuild build/web after each edit
+#   allow:
+#     - "lib/main.dart"          # widgets/themes; no CSS in Flutter
+
+# --- Native iOS Simulator (commented) ---------------------------------------
+# `platform: ios-sim` captures a REAL iOS simulator instead of a web page —
+# there is no HTTP server and no DOM. The SimulatorAdapter only boots the
+# simulator and screenshots it via `xcrun simctl`:
+#     xcrun simctl bootstatus <udid> -b              # boot + wait
+#     xcrun simctl io <udid> screenshot <out.png>    # capture
+#
+# Building and LAUNCHING the app into the simulator is done by `serve.cmd`
+# (e.g. `flutter run -d <udid>`), NOT by the adapter. Because the capture is
+# native, there is no real URL: `serve.url` is an unused placeholder.
+#
+# IN-PLACE execution: native builds are far too heavy to copy into a throwaway
+# git worktree, so ios-sim runs DIRECTLY on this project dir (reusing the build
+# cache) instead of in an isolated worktree like web does. ui_implement still
+# diff-gates and, when `apply: false`, reverts its edits via git so nothing is
+# left behind; ui_review always reverts (read-only). You do NOT need to commit or
+# stash first — before the run the server snapshots your current state into a
+# dangling git baseline and gates/reverts only agy's edits, so your uncommitted
+# work is preserved exactly. The only requirement is a git repo with >=1 commit.
+#
+# READINESS: with no HTTP url to poll, the orchestrator waits by SCREENSHOTTING
+# the simulator until two consecutive frames are identical (the app finished
+# launching + first paint settled). Bump `ready_timeout` for slow cold builds.
+#
+# RELOAD = PTY HOT-RELOAD: `serve.cmd` (e.g. `flutter run`) is launched under a
+# pseudo-terminal and kept alive across iterations. After each agy edit the
+# orchestrator sends `r` (hot reload), with an automatic `R` (hot restart)
+# fallback when a reload produces no visual change, and a graceful `q` to release
+# Flutter's lockfile on shutdown — no relaunch, and `reload_cmd` is unused for
+# native.
+#
+# The simulator is chosen by the referenced device: set `udid` to pin an exact
+# simulator, or `name` (the *simulator* name, e.g. "iPhone 17") which the
+# adapter resolves to a UDID at capture time. Native devices need no
+# width/height. Web-only target fields (route, theme, viewport, pre_steps,
+# media emulation) do not apply to native captures.
+#
+# Android (`android-emu`) works the same way via `adb`: the adapter screenshots
+# with `adb exec-out screencap -p` and can auto-launch an AVD by name
+# (`emulator -avd <name>`). It needs the Android SDK platform-tools (`adb`) on
+# PATH and an AVD configured.
+#
+#   platform: ios-sim
+#   serve:
+#     cmd: "flutter run -d <udid>"      # build + launch app into the simulator
+#     url: ""                           # placeholder; native capture ignores it
+#     ready_timeout: 300                # native builds/launches are slow
+#   devices:
+#     sim:
+#       name: "iPhone 17"               # OR: udid: "ABCD1234-..." to pin one
+#   targets:
+#     - name: "home"
+#       device: "sim"                   # keys into devices.sim above
+#   allow:
+#     - "lib/main.dart"                 # Dart widgets/themes; no CSS
+
+# Files the agent is allowed to edit or create (frontend/UI surface).
+allow:
+  - "src/**/*.css"
+  - "src/**/*.scss"
+  - "src/components/**"
+  - "src/**/*.tsx"
+  - "src/**/*.jsx"
+  - "public/**/*.svg"
+  - "index.html"
+
+# Files the agent must NEVER touch (backend/API/server/business logic).
+# Deny wins over allow, so these override the broad `src/**/*.tsx` allow above.
+deny:
+  - "**/api/**"
+  - "**/server/**"
+  - "**/*.server.*"
+  - "**/route.*"
+  - "**/*.test.*"
+  - "**/node_modules/**"
+
+# Files that need human confirmation before edit (sensitive entry points).
+ambiguous:
+  - "src/main.tsx"
+  - "src/App.tsx"
+  - "vite.config.*"
+
+# How to serve the app so the screenshot/review step can reach it.
+serve:
+  cmd: "npm run dev"
+  url: "http://localhost:5173"
+  ready_timeout: 30
+
+# --- Capture model ----------------------------------------------------------
+#
+# There are two ways to declare what gets screenshotted:
+#
+# 1. `viewports` (backward-compatible): a flat list of widths. Each width is
+#    captured at the base URL. Kept working unchanged for existing configs.
+# 2. `targets` (recommended): one independent capture per entry, each able to
+#    set its own route, device, theme, component state, and design mockup.
+#
+# When `targets` is non-empty it SUPERSEDES `viewports`. Leave `targets` out (or
+# empty) to keep the simple `viewports` behavior below.
+
+# Viewport widths (px) to capture for responsive review (backward-compatible).
+# Order: desktop, tablet, mobile. Used only when `targets` is empty.
+viewports:
+  - 1440
+  - 768
+  - 390
+
+# Named device profiles, referenceable from a target via `device: <key>`.
+# A device is either a Playwright registry `name` (full phone emulation:
+# viewport, DPR, touch, user-agent) OR an explicit width+height with optional
+# device_scale_factor / is_mobile / has_touch / user_agent.
+devices:
+  desktop:
+    width: 1440
+    height: 900
+  mobile:
+    name: "iPhone 13"   # from Playwright's built-in device registry
+
+# Explicit capture targets. Each target is one screenshot: route x device x
+# theme x state, with its own optional design mockup (`design_ref`).
+# Uncomment and adapt to enable the targets model (this supersedes `viewports`).
+#
+# targets:
+#   # Desktop home page matched against a desktop mockup.
+#   - name: "home-desktop"
+#     route: "/"
+#     device: "desktop"
+#     design_ref: "./mockups/home-desktop.png"
+#
+#   # Mobile home page in dark theme, with the nav drawer opened first, matched
+#   # against a separate mobile mockup. Pre-steps drive component state before
+#   # the shot; theme is applied via an attribute on the theme_selector element.
+#   - name: "home-mobile-dark"
+#     route: "/"
+#     device: "mobile"
+#     theme: "dark"               # set data-theme="dark" on <html> (defaults)
+#     theme_attr: "data-theme"
+#     theme_selector: "html"
+#     design_ref: "./mockups/home-mobile-dark.png"
+#     pre_steps:
+#       - action: "click"          # open the mobile menu
+#         selector: "button.menu-toggle"
+#       - action: "wait_for"       # ensure the drawer finished animating in
+#         selector: "nav.mobile-drawer"
+#         state: "visible"
+#
+#   # --- Extra design cases covered via media/state emulation ----------------
+#   #
+#   # These exercise the remaining "non-happy-path" surfaces a designer cares
+#   # about. Each one is a normal target; the new fields drive emulation.
+#
+#   # PRINT: render the print stylesheet (`@media print`) so invoices/receipts
+#   # are reviewed as they'd actually print. `full_page` grabs the whole doc.
+#   - name: "invoice-print"
+#     route: "/invoice"
+#     media: "print"             # emulate the print media type
+#     full_page: true
+#
+#   # DARK via OS media query: emulate `prefers-color-scheme: dark`. This is
+#   # distinct from `theme:` (an app attribute) — use this when the app themes
+#   # itself purely through `@media (prefers-color-scheme: dark)`.
+#   - name: "home-dark"
+#     route: "/"
+#     color_scheme: "dark"
+#
+#   # HIGH-CONTRAST / forced-colors (e.g. Windows high-contrast mode): emulate
+#   # `forced-colors: active` to catch UI that breaks when the OS overrides
+#   # colors. (Automated contrast/a11y checks are a separate roadmap item.)
+#   - name: "home-hc"
+#     route: "/"
+#     forced_colors: "active"
+#
+#   # RTL: flip the document to `dir="rtl"` to review right-to-left layouts
+#   # (mirrored spacing, icon direction, text alignment).
+#   - name: "home-rtl"
+#     route: "/"
+#     rtl: true
+#
+#   # EMPTY DATA STATE: seed localStorage *before* load so the cart renders its
+#   # empty state. Values are plain strings (JSON encoded by your app).
+#   - name: "cart-empty"
+#     route: "/cart"
+#     local_storage:
+#       cart: "[]"               # app reads an empty cart -> empty state
+#
+#   # LONG / OVERFLOW DATA STATE: seed a large payload to check overflow,
+#   # truncation, and scroll behavior. `full_page` captures the whole list.
+#   - name: "cart-overflow"
+#     route: "/cart"
+#     full_page: true
+#     local_storage:
+#       cart: '[{"id":1,"name":"A very long product name that should wrap or truncate"},{"id":2,"name":"Another long item"},{"id":3,"name":"Yet another"}]'

@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.Python
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local scope config (the .example is committed; the real one is per-project)
+.agy-ui-scope
+
+# Codex peer-review session state (transient)
+.codex-review/
+
+# Local example/demo apps: heavy (node_modules, build, native ios/android
+# scaffolding) and each carries its own git history — kept locally for live
+# testing, not published. See README + .agy-ui-scope.example for config.
+examples/
+
+# Playwright artifacts
+playwright-report/
+test-results/
+*.png
+
+# Secrets / env
+.env
+.env.*
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store

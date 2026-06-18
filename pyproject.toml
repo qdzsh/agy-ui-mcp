@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agy-ui-mcp"
+version = "0.1.0"
+description = "MCP server that delegates frontend/UI work to the agy CLI (Gemini), scoped via a diff-gate to never touch backend/API/business logic."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "agy-ui-mcp authors" }]
+keywords = ["mcp", "ui", "frontend", "gemini", "agy", "playwright"]
+
+dependencies = [
+    # Model Context Protocol server runtime (Claude Code + Codex compatible).
+    "mcp>=1.0,<2",
+    # Data validation / config models.
+    "pydantic>=2,<3",
+    # YAML parsing for the .agy-ui-scope config file.
+    "pyyaml>=6,<7",
+    # Glob matching for scope allow/deny/ambiguous classification.
+    "pathspec>=0.12,<1",
+    # Browser automation for screenshot-based visual review. Browsers are NOT
+    # installed by this package; run `playwright install chromium` separately.
+    "playwright>=1.40,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+
+[project.scripts]
+# Console entry point. Equivalent to `python -m agy_ui_mcp`.
+agy-ui-mcp = "agy_ui_mcp.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/qdzsh/agy-ui-mcp"
+Repository = "https://github.com/qdzsh/agy-ui-mcp"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# Ship the vendored axe-core bundle so audit_a11y works from an installed wheel.
+"agy_ui_mcp" = ["vendor/*.js"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
