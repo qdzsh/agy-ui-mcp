@@ -9,6 +9,7 @@ All models are Pydantic v2. The single entry point is :func:`load_scope`.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Final, Literal
 
@@ -326,3 +327,331 @@ def load_scope(project_dir: str | Path) -> AgyUiScope:
         raise ValueError(f"{scope_path} must contain a YAML mapping at the top level")
 
     return AgyUiScope.model_validate(data)
+
+
+# --- Zero-config scope synthesis --------------------------------------------
+#
+# Most users of agy-ui-mcp are non-technical "vibe coders" who cannot hand-write
+# the ``.agy-ui-scope`` YAML. :func:`synthesize_scope` inspects the project's
+# manifests/lockfiles and produces a sensible scope so the tools work with no
+# config at all, returning human-readable warnings that explain the guess and
+# point at ``ui_init`` for persisting/customizing it.
+
+#: Short framework labels :func:`detect_framework` may return.
+FrameworkLabel = Literal[
+    "flutter", "expo", "ionic", "next", "vite-react", "cra", "generic-web", "unknown"
+]
+
+#: Deny globs shared by every web/expo/ionic/next profile — backend, API,
+#: server-only, route handlers, tests, and vendored deps are always off-limits.
+_WEB_DENY: Final[list[str]] = [
+    "**/api/**",
+    "**/server/**",
+    "**/*.server.*",
+    "**/route.ts",
+    "**/route.js",
+    "**/*.test.*",
+    "**/*.spec.*",
+    "**/node_modules/**",
+]
+
+#: Allow globs for a generic Vite-style web app (also reused by the generic
+#: fallback). Component/style files plus the entry HTML/assets.
+_VITE_ALLOW: Final[list[str]] = [
+    "src/**/*.css",
+    "src/**/*.scss",
+    "src/components/**",
+    "src/**/*.tsx",
+    "src/**/*.jsx",
+    "public/**/*.svg",
+    "index.html",
+]
+
+
+def _detect_package_manager(root: Path) -> str:
+    """Detect the JS package manager from a lockfile in ``root``.
+
+    Returns one of ``pnpm`` / ``yarn`` / ``bun`` / ``npm`` (the default when no
+    recognized lockfile is present).
+    """
+    if (root / "pnpm-lock.yaml").is_file():
+        return "pnpm"
+    if (root / "yarn.lock").is_file():
+        return "yarn"
+    if (root / "bun.lockb").is_file():
+        return "bun"
+    return "npm"
+
+
+def _run_script_cmd(pm: str, script: str) -> str:
+    """Format the command that runs an npm ``script`` with package manager ``pm``.
+
+    ``yarn`` invokes scripts without the ``run`` keyword (``yarn dev``); the
+    other managers use ``<pm> run <script>`` (``npm run dev``, ``pnpm run dev``,
+    ``bun run dev``).
+    """
+    if pm == "yarn":
+        return f"yarn {script}"
+    return f"{pm} run {script}"
+
+
+def _read_package_json(root: Path) -> tuple[dict[str, str], dict[str, str]]:
+    """Read ``package.json`` and return its merged deps and its scripts.
+
+    Returns ``(deps, scripts)`` where ``deps`` merges ``dependencies`` and
+    ``devDependencies`` (name -> version). Missing/malformed files degrade to
+    empty mappings so detection still produces a generic web profile.
+    """
+    try:
+        data = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}, {}
+    if not isinstance(data, dict):
+        return {}, {}
+    deps: dict[str, str] = {}
+    for key in ("dependencies", "devDependencies"):
+        section = data.get(key)
+        if isinstance(section, dict):
+            deps.update(section)
+    scripts = data.get("scripts")
+    scripts = scripts if isinstance(scripts, dict) else {}
+    return deps, scripts
+
+
+def _glob_exists(root: Path, *patterns: str) -> bool:
+    """Return True if any of ``patterns`` matches a file directly under ``root``."""
+    return any(next(iter(root.glob(p)), None) is not None for p in patterns)
+
+
+def detect_framework(project_dir: str | Path) -> FrameworkLabel:
+    """Classify the project's frontend framework from its manifests on disk.
+
+    The same precedence as :func:`synthesize_scope`, exposed separately so the
+    ``ui_init`` tool can report a stable framework label without re-deriving a
+    full scope.
+    """
+    root = Path(project_dir)
+    if (root / "pubspec.yaml").is_file():
+        return "flutter"
+    if not (root / "package.json").is_file():
+        return "unknown"
+
+    deps, _ = _read_package_json(root)
+    if "expo" in deps:
+        return "expo"
+    if any(name.startswith("@ionic/") for name in deps):
+        return "ionic"
+    if "next" in deps or _glob_exists(root, "next.config.*"):
+        return "next"
+    if "vite" in deps or _glob_exists(root, "vite.config.*"):
+        return "vite-react"
+    if "react-scripts" in deps:
+        return "cra"
+    return "generic-web"
+
+
+def _customize_hint() -> str:
+    """Standard pointer telling the user how to persist/customize the guess."""
+    return (
+        "Run the `ui_init` tool to write a `.agy-ui-scope` file you can edit "
+        "(see `.agy-ui-scope.example` for per-screen targets and other options)."
+    )
+
+
+def synthesize_scope(project_dir: str | Path) -> tuple[AgyUiScope, list[str]]:
+    """Auto-detect the stack and build a zero-config :class:`AgyUiScope`.
+
+    Inspects ``project_dir`` for framework manifests/lockfiles and returns a
+    ready-to-use scope plus human-readable warnings explaining that a guessed
+    (zero-config) scope was used and how to customize it via ``ui_init``.
+
+    Detection precedence: Flutter (``pubspec.yaml``) -> JS frameworks by
+    dependency (expo / ionic / next / vite / react-scripts) -> generic web. With
+    no manifest at all, falls back to the generic web profile.
+
+    Args:
+        project_dir: Path to the project root to inspect.
+
+    Returns:
+        A ``(scope, warnings)`` tuple. ``warnings`` is always non-empty (it at
+        least notes that zero-config detection was used).
+    """
+    root = Path(project_dir)
+    warnings: list[str] = []
+    hint = _customize_hint()
+
+    # 1. Flutter: pubspec.yaml at the root.
+    if (root / "pubspec.yaml").is_file():
+        scope = AgyUiScope(
+            model=DEFAULT_MODEL,
+            platform="flutter-web",
+            serve=ServeConfig(
+                cmd="flutter run -d web-server --web-port 5000",
+                url="http://localhost:5000",
+                ready_timeout=120,
+            ),
+            allow=["lib/**/*.dart"],
+            deny=["test/**"],
+            ambiguous=[],
+        )
+        warnings.append(
+            "No .agy-ui-scope found; detected a Flutter project (pubspec.yaml) "
+            "and used zero-config flutter-web defaults. " + hint
+        )
+        return scope, warnings
+
+    # 2/3. No package.json -> generic web fallback (no manifest found).
+    if not (root / "package.json").is_file():
+        scope = _generic_web_scope()
+        warnings.append(
+            "No .agy-ui-scope and no package.json/pubspec.yaml found; used "
+            "generic web defaults (Vite-style, http://localhost:5173). " + hint
+        )
+        return scope, warnings
+
+    # 2. JS/TS project: read package.json + pick a profile by dependencies.
+    deps, scripts = _read_package_json(root)
+    pm = _detect_package_manager(root)
+    dev_script = "dev" if "dev" in scripts else ("start" if "start" in scripts else None)
+    # Default dev command for HMR servers (next/vite/generic). Fall back to a
+    # plain `<pm> run dev` when the project declares no usable script.
+    dev_cmd = _run_script_cmd(pm, dev_script) if dev_script else _run_script_cmd(pm, "dev")
+
+    # Expo: react-native-web served via the expo CLI (StyleSheet lives in tsx/jsx).
+    if "expo" in deps:
+        scope = AgyUiScope(
+            model=DEFAULT_MODEL,
+            platform="expo-web",
+            serve=ServeConfig(
+                cmd="npx expo start --web",
+                url="http://localhost:19006",
+                ready_timeout=60,
+            ),
+            allow=["**/*.tsx", "**/*.jsx", "app/**/*.tsx"],
+            deny=list(_WEB_DENY),
+            ambiguous=[],
+        )
+        warnings.append(
+            "No .agy-ui-scope found; detected an Expo project and used "
+            "zero-config expo-web defaults. " + hint
+        )
+        return scope, warnings
+
+    # Ionic: any @ionic/* dependency -> `ionic serve` web build on :8100.
+    if any(name.startswith("@ionic/") for name in deps):
+        scope = AgyUiScope(
+            model=DEFAULT_MODEL,
+            platform="ionic",
+            serve=ServeConfig(
+                cmd="ionic serve",
+                url="http://localhost:8100",
+                ready_timeout=60,
+            ),
+            allow=["src/**/*.scss", "src/**/*.html", "src/**/*.css"],
+            deny=list(_WEB_DENY),
+            ambiguous=[],
+        )
+        warnings.append(
+            "No .agy-ui-scope found; detected an Ionic project and used "
+            "zero-config ionic defaults. " + hint
+        )
+        return scope, warnings
+
+    # Next.js: `next` dep or a next.config.* at the root -> :3000.
+    if "next" in deps or _glob_exists(root, "next.config.*"):
+        scope = AgyUiScope(
+            model=DEFAULT_MODEL,
+            platform="web",
+            serve=ServeConfig(
+                cmd=dev_cmd,
+                url="http://localhost:3000",
+                ready_timeout=60,
+            ),
+            allow=[
+                "app/**/*.tsx",
+                "app/**/*.jsx",
+                "components/**",
+                "src/**/*.tsx",
+                "src/**/*.jsx",
+                "src/**/*.css",
+                "src/**/*.scss",
+                "**/*.module.css",
+            ],
+            deny=list(_WEB_DENY),
+            ambiguous=[
+                "app/layout.tsx",
+                "app/layout.jsx",
+                "next.config.*",
+                "src/app/layout.tsx",
+            ],
+        )
+        warnings.append(
+            "No .agy-ui-scope found; detected a Next.js project and used "
+            "zero-config web defaults (http://localhost:3000). " + hint
+        )
+        return scope, warnings
+
+    # Vite: `vite` dep or a vite.config.* at the root -> :5173.
+    if "vite" in deps or _glob_exists(root, "vite.config.*"):
+        scope = AgyUiScope(
+            model=DEFAULT_MODEL,
+            platform="web",
+            serve=ServeConfig(
+                cmd=dev_cmd,
+                url="http://localhost:5173",
+                ready_timeout=30,
+            ),
+            allow=list(_VITE_ALLOW),
+            deny=list(_WEB_DENY),
+            ambiguous=["src/main.tsx", "src/App.tsx", "vite.config.*"],
+        )
+        warnings.append(
+            "No .agy-ui-scope found; detected a Vite project and used "
+            "zero-config web defaults (http://localhost:5173). " + hint
+        )
+        return scope, warnings
+
+    # Create React App: `react-scripts` dep -> CRA dev server on :3000.
+    if "react-scripts" in deps:
+        scope = AgyUiScope(
+            model=DEFAULT_MODEL,
+            platform="web",
+            serve=ServeConfig(
+                cmd=_run_script_cmd(pm, "start"),
+                url="http://localhost:3000",
+                ready_timeout=60,
+            ),
+            allow=list(_VITE_ALLOW),
+            deny=list(_WEB_DENY),
+            ambiguous=["src/main.tsx", "src/App.tsx"],
+        )
+        warnings.append(
+            "No .agy-ui-scope found; detected a Create React App project and "
+            "used zero-config web defaults (http://localhost:3000). " + hint
+        )
+        return scope, warnings
+
+    # Generic web: a package.json we could not classify -> Vite-style defaults.
+    scope = _generic_web_scope(dev_cmd=dev_cmd)
+    warnings.append(
+        "No .agy-ui-scope found; could not identify the framework from "
+        "package.json, used generic web defaults (http://localhost:5173). "
+        + hint
+    )
+    return scope, warnings
+
+
+def _generic_web_scope(dev_cmd: str = "npm run dev") -> AgyUiScope:
+    """Build the generic Vite-style web profile used by the fallbacks."""
+    return AgyUiScope(
+        model=DEFAULT_MODEL,
+        platform="web",
+        serve=ServeConfig(
+            cmd=dev_cmd,
+            url="http://localhost:5173",
+            ready_timeout=30,
+        ),
+        allow=list(_VITE_ALLOW),
+        deny=list(_WEB_DENY),
+        ambiguous=[],
+    )

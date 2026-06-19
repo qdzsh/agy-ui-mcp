@@ -37,10 +37,19 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from . import agy_runner, screenshot, worktree
+import yaml
+
+from . import agy_runner, screenshot, scope as scope_mod, worktree
 from .policy_builder import apply_diff_gate
 from .screenshot import NATIVE_PLATFORMS
-from .scope import AgyUiScope, Device, Target, load_scope, resolve_targets
+from .scope import (
+    SCOPE_FILENAME,
+    AgyUiScope,
+    Device,
+    Target,
+    load_scope,
+    resolve_targets,
+)
 
 #: When truthy (env ``AGY_UI_DRY_RUN``), tools skip all external side effects and
 #: return a stub payload. Lets the server be exercised without agy/playwright.
@@ -56,6 +65,72 @@ def _load_scope_or_error(project_dir: str) -> AgyUiScope:
         return load_scope(project_dir)
     except (FileNotFoundError, ValueError) as exc:
         raise ValueError(str(exc)) from exc
+
+
+def _load_or_synthesize_scope(
+    project_dir: str,
+) -> tuple[AgyUiScope, list[str]]:
+    """Load ``.agy-ui-scope`` if present, else auto-detect a zero-config scope.
+
+    Zero-config support for non-technical users: when no scope file exists we
+    synthesize one from the project's manifests (see
+    :func:`scope.synthesize_scope`) and return the warnings explaining the guess.
+    A malformed *existing* file still raises ``ValueError`` (re-raised as today)
+    so the user sees the parse error rather than a silently-guessed scope.
+
+    Returns:
+        A ``(scope, warnings)`` tuple. ``warnings`` is empty when a real scope
+        file was loaded, non-empty when a zero-config scope was synthesized.
+    """
+    try:
+        return load_scope(project_dir), []
+    except FileNotFoundError:
+        return scope_mod.synthesize_scope(project_dir)
+    except ValueError as exc:  # malformed existing file -> surface as today
+        raise ValueError(str(exc)) from exc
+
+
+def _preflight(scope: AgyUiScope, *, web: bool) -> str | None:
+    """Return a friendly 'why this can't run yet' message, or None when ready.
+
+    Catches the two setup gaps non-technical users hit before any external call
+    is made, so the tool returns a clear ``blocked`` result instead of a raw
+    crash deep in agy/Playwright:
+
+    * The ``agy`` CLI is not on PATH (not installed / not logged in).
+    * Web captures but the ``playwright`` Python package is not importable.
+
+    Skipped entirely under :data:`DRY_RUN` (callers guard on DRY_RUN before
+    invoking, but this is defensive).
+
+    Args:
+        scope: The loaded/synthesized scope (unused today; reserved for future
+            per-platform checks and to keep the call site uniform).
+        web: True when the platform is captured over HTTP with Playwright.
+
+    Returns:
+        A human-readable reason string, or None if all preflight checks pass.
+    """
+    if DRY_RUN:
+        return None
+    if shutil.which("agy") is None:
+        return (
+            "The `agy` CLI is not on your PATH. agy-ui-mcp delegates the actual "
+            "UI edits to Antigravity's `agy` CLI: install it and log in (it uses "
+            "your Antigravity subscription auth), then retry. See the "
+            "Requirements section of the README for setup."
+        )
+    if web:
+        try:
+            import playwright  # noqa: F401 - import is the availability probe
+        except ImportError:
+            return (
+                "The `playwright` Python package is required to screenshot web "
+                "apps but is not installed. Install it with `pip install "
+                "playwright` and download the browser with `playwright install "
+                "chromium`, then retry."
+            )
+    return None
 
 
 def _blocked_implement(reason: str) -> dict[str, Any]:
@@ -761,7 +836,10 @@ def ui_implement(
         remaining differences, or ``""``).
     """
     design_refs = list(design_refs or [])
-    scope = _load_scope_or_error(project_dir)
+    # Zero-config: load .agy-ui-scope if present, else auto-detect from the
+    # project's manifests (runs for both DRY_RUN and the real path). A malformed
+    # existing file still raises and surfaces via the existing error path.
+    scope, synth_warnings = _load_or_synthesize_scope(project_dir)
 
     if DRY_RUN:
         return {
@@ -772,12 +850,22 @@ def ui_implement(
             "shots_before": [],
             "shots_after": [],
             "targets": [],
-            "warnings": ["AGY_UI_DRY_RUN set: no agy/playwright/git executed."],
+            "warnings": (
+                synth_warnings
+                + ["AGY_UI_DRY_RUN set: no agy/playwright/git executed."]
+            ),
             "applied": False,
             "applied_files": [],
             "match_score": None,
             "match_gaps": "",
         }
+
+    # Friendly preflight: block with an actionable reason before any external
+    # call when the agy CLI / Playwright aren't set up.
+    web = scope.platform not in NATIVE_PLATFORMS
+    pf = _preflight(scope, web=web)
+    if pf:
+        return _blocked_implement(pf)
 
     # Native platforms (ios-sim) build into a simulator: too heavy for a throwaway
     # git worktree, so they run IN-PLACE on the project (reusing the build cache).
@@ -796,7 +884,7 @@ def ui_implement(
             worktree.link_dependencies(handle)
     except worktree.InPlaceSafetyError as exc:
         return _blocked_implement(str(exc))
-    warnings: list[str] = list(handle.warnings)
+    warnings: list[str] = list(synth_warnings) + list(handle.warnings)
     # Native captures have no HTTP URL (the app runs in a simulator); the web
     # path keeps appending target routes to the configured serve URL.
     base_url = "" if is_native else (scope.serve.url if scope.serve else "")
@@ -1095,7 +1183,9 @@ def ui_review(
         [violations]}`` map; empty when disabled/native), and ``warnings``.
     """
     against_design = list(against_design or [])
-    scope = _load_scope_or_error(project_dir)
+    # Zero-config: load .agy-ui-scope if present, else auto-detect (see
+    # ui_implement). Runs for both DRY_RUN and the real path.
+    scope, synth_warnings = _load_or_synthesize_scope(project_dir)
 
     if DRY_RUN:
         return {
@@ -1103,8 +1193,17 @@ def ui_review(
             "shots": [],
             "targets": [],
             "a11y": {},
-            "warnings": ["AGY_UI_DRY_RUN set: no agy/playwright/git executed."],
+            "warnings": (
+                synth_warnings
+                + ["AGY_UI_DRY_RUN set: no agy/playwright/git executed."]
+            ),
         }
+
+    # Friendly preflight before any external call (see ui_implement).
+    web = scope.platform not in NATIVE_PLATFORMS
+    pf = _preflight(scope, web=web)
+    if pf:
+        return _blocked_review(pf)
 
     # Native platforms run IN-PLACE (no worktree) and reuse the build cache, just
     # like ui_implement. The review is still read-only: a SCOPED revert against
@@ -1122,7 +1221,7 @@ def ui_review(
             worktree.link_dependencies(handle)
     except worktree.InPlaceSafetyError as exc:
         return _blocked_review(str(exc))
-    warnings: list[str] = list(handle.warnings)
+    warnings: list[str] = list(synth_warnings) + list(handle.warnings)
     base_url = "" if is_native else (scope.serve.url if scope.serve else "")
     targets = _effective_targets(scope, target_route)
     target_names = [t.name or "" for t in targets]
@@ -1256,6 +1355,183 @@ def ui_review(
         "shots": shots,
         "targets": target_names,
         "a11y": a11y_results,
+        "warnings": warnings,
+    }
+
+
+#: Comment header prepended to a generated ``.agy-ui-scope`` so the user knows
+#: it was auto-generated and how to extend it.
+_SCOPE_HEADER: str = (
+    "# .agy-ui-scope — auto-generated by the `ui_init` tool.\n"
+    "#\n"
+    "# This file was guessed from your project's stack. Edit it freely: tweak\n"
+    "# the allow/deny globs, the serve command/url, or add per-screen `targets`\n"
+    "# with a `design_ref` pointing at a mockup image, e.g.\n"
+    "#\n"
+    "#   targets:\n"
+    "#     - name: login\n"
+    "#       route: /login\n"
+    "#       design_ref: ./design/login.png\n"
+    "#\n"
+    "# See `.agy-ui-scope.example` for the full set of options.\n"
+)
+
+#: Candidate design-asset directories `ui_init` probes for (relative to root).
+_DESIGN_DIRS: tuple[str, ...] = ("design", "designs", "mockups")
+
+
+def _scope_to_yaml(scope: AgyUiScope) -> str:
+    """Serialize the core of a scope to YAML for a generated ``.agy-ui-scope``.
+
+    Emits ``model``, ``platform``, the ``serve`` block, and the allow/deny/
+    ambiguous globs — the fields :func:`scope.synthesize_scope` populates. The
+    comment header (added by the caller) covers ``targets``/``devices``.
+    """
+    data: dict[str, Any] = {
+        "model": scope.model,
+        "platform": scope.platform,
+    }
+    if scope.serve is not None:
+        data["serve"] = {
+            "cmd": scope.serve.cmd,
+            "url": scope.serve.url,
+            "ready_timeout": scope.serve.ready_timeout,
+        }
+    data["allow"] = list(scope.allow)
+    data["deny"] = list(scope.deny)
+    data["ambiguous"] = list(scope.ambiguous)
+    return yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
+
+
+@mcp.tool()
+def ui_init(project_dir: str = ".", overwrite: bool = False) -> dict[str, Any]:
+    """Auto-detect the stack and write a starter ``.agy-ui-scope`` config.
+
+    Zero-to-config helper for non-technical users: inspects the project's
+    manifests (package.json / pubspec.yaml / lockfiles), guesses the framework,
+    serve command, and edit-scope globs, and writes a ``.agy-ui-scope`` YAML at
+    the project root that the user can then tweak by hand. After this, the
+    ``ui_implement`` / ``ui_review`` tools run with no further setup.
+
+    Args:
+        project_dir: Path to the project root to scan and write into.
+        overwrite: When False (default) an existing ``.agy-ui-scope`` is left
+            untouched and ``status: "exists"`` is returned. Pass True to
+            regenerate it (clobbering the existing file).
+
+    Returns:
+        A dict describing the outcome: ``status`` (``ok``/``exists``/``error``),
+        ``scope_path`` (absolute), ``written`` (whether the file was written),
+        ``detected`` (framework/platform/serve/package-manager), ``allow`` and
+        ``deny`` globs, ``design_dir_found``, ``next_steps``, and ``warnings``.
+    """
+    root = Path(project_dir).resolve()
+    scope_path = root / SCOPE_FILENAME
+
+    framework = scope_mod.detect_framework(root)
+    pm = (
+        scope_mod._detect_package_manager(root)
+        if (root / "package.json").is_file()
+        else "none"
+    )
+    design_dir_found = any((root / d).is_dir() for d in _DESIGN_DIRS)
+
+    try:
+        scope, warnings = scope_mod.synthesize_scope(root)
+    except OSError as exc:  # pragma: no cover - unreadable project dir
+        return {
+            "status": "error",
+            "scope_path": str(scope_path),
+            "written": False,
+            "detected": {
+                "framework": framework,
+                "platform": "",
+                "serve_cmd": "",
+                "serve_url": "",
+                "package_manager": pm,
+            },
+            "allow": [],
+            "deny": [],
+            "design_dir_found": design_dir_found,
+            "next_steps": [],
+            "warnings": [f"Could not scan {root}: {exc}"],
+        }
+
+    serve_cmd = scope.serve.cmd if scope.serve else ""
+    serve_url = scope.serve.url if scope.serve else ""
+    detected = {
+        "framework": framework,
+        "platform": scope.platform,
+        "serve_cmd": serve_cmd,
+        "serve_url": serve_url,
+        "package_manager": pm,
+    }
+
+    # Never clobber an existing config unless explicitly asked to.
+    if scope_path.exists() and not overwrite:
+        return {
+            "status": "exists",
+            "scope_path": str(scope_path),
+            "written": False,
+            "detected": detected,
+            "allow": list(scope.allow),
+            "deny": list(scope.deny),
+            "design_dir_found": design_dir_found,
+            "next_steps": [
+                f"A {SCOPE_FILENAME} already exists; it was left unchanged.",
+                "Call ui_init again with overwrite=True to regenerate it from "
+                "the detected stack.",
+            ],
+            "warnings": warnings,
+        }
+
+    try:
+        scope_path.write_text(
+            _SCOPE_HEADER + "\n" + _scope_to_yaml(scope), encoding="utf-8"
+        )
+    except OSError as exc:
+        return {
+            "status": "error",
+            "scope_path": str(scope_path),
+            "written": False,
+            "detected": detected,
+            "allow": list(scope.allow),
+            "deny": list(scope.deny),
+            "design_dir_found": design_dir_found,
+            "next_steps": [],
+            "warnings": warnings + [f"Could not write {scope_path}: {exc}"],
+        }
+
+    next_steps: list[str] = []
+    if not design_dir_found:
+        next_steps.append(
+            "Create a ./design/ folder and drop your screen mockups (PNG/JPG) "
+            "into it so the tools can match the UI against them."
+        )
+    else:
+        next_steps.append(
+            "Found a design folder — reference a mockup per screen via "
+            "`design_ref` in the targets you add, or pass `design_refs` to "
+            "ui_implement."
+        )
+    next_steps.append(
+        f"Review the generated {SCOPE_FILENAME} (serve command, url, and the "
+        "allow/deny globs) and adjust anything the auto-detector got wrong."
+    )
+    next_steps.append(
+        "Then call ui_implement with your task (and optional design_refs) to "
+        "start the vision loop."
+    )
+
+    return {
+        "status": "ok",
+        "scope_path": str(scope_path),
+        "written": True,
+        "detected": detected,
+        "allow": list(scope.allow),
+        "deny": list(scope.deny),
+        "design_dir_found": design_dir_found,
+        "next_steps": next_steps,
         "warnings": warnings,
     }
 

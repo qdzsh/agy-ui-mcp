@@ -194,8 +194,12 @@ Notes:
 
 - **Python ≥ 3.10**
 - **The `agy` CLI**, installed and logged in (subscription auth)
-- **Playwright Chromium** for web/a11y captures - installed separately
-  (`playwright install chromium`); not needed for native-only use
+- **Playwright Chromium** for web/a11y captures - **auto-installed on first use**
+  (or set `AGY_UI_CHROME_CHANNEL=chrome` to reuse an already-installed Chrome);
+  not needed for native-only use
+- **`.agy-ui-scope` is optional** - it is auto-detected from your stack when
+  absent. Run `ui_init` to generate one, and see `templates/agy-ui.rule.md` for
+  the recommended agent rule block
 - **Native iOS** (`ios-sim`): macOS + Xcode + a Flutter project, and a booted
   iOS Simulator
 - **Native Android** (`android-emu`): the Android SDK platform-tools (`adb`) and
@@ -203,19 +207,32 @@ Notes:
 
 ## Install
 
-### From the remote
+### One-liner (easiest)
+
+Runs a self-contained installer straight from the internet (no clone needed). It
+installs the server, tries to install Chromium, and offers to register with
+Claude Code:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/qdzsh/agy-ui-mcp/main/scripts/bootstrap.sh | bash
+```
+
+### From PyPI
 
 ```bash
 # 1. Install the server (gives you an `agy-ui-mcp` command on PATH)
-pipx install git+https://github.com/qdzsh/agy-ui-mcp
-# or: uv tool install git+https://github.com/qdzsh/agy-ui-mcp
+pipx install agy-ui-mcp
+# or: uv tool install agy-ui-mcp
+# Not published yet / want the latest main? Use the repo as a fallback:
+#   pipx install git+https://github.com/qdzsh/agy-ui-mcp
 
 # 2. Register it with Claude Code
 claude mcp add agy-ui --scope user -- agy-ui-mcp
-
-# 3. (web/a11y only) install the browser
-"$(pipx environment --value PIPX_LOCAL_VENVS)/agy-ui-mcp/bin/playwright" install chromium
 ```
+
+The Chromium browser auto-installs on first use, so there is no manual
+`playwright install chromium` step. (To reuse an already-installed Chrome and
+skip the download, set `AGY_UI_CHROME_CHANNEL=chrome`.)
 
 ### From a clone (one command)
 
@@ -226,6 +243,33 @@ git clone https://github.com/qdzsh/agy-ui-mcp.git && cd agy-ui-mcp
 ```
 
 `scripts/install.sh` is interactive and idempotent; re-run it any time.
+
+## Zero-config quick start
+
+You do **not** need a `.agy-ui-scope` file to get going - the server
+auto-detects your stack (Vite/React, Next.js, Expo, Ionic, CRA, Flutter-web, or
+generic web) and synthesizes a scope on the fly. The minimal flow:
+
+1. **Install** (any option above).
+2. **Log into `agy` once** (subscription auth - no API key).
+3. **Drop a mockup image** into your project, e.g. `./design/home.png`.
+4. **Ask the agent to match it** by calling:
+
+   ```
+   ui_implement(project_dir=".", task="Match the running home screen to this mockup",
+                design_refs=["./design/home.png"], target_route="/")
+   ```
+
+That is enough for the loop to run with zero config files. When you want to
+customize the scope (allow/deny globs, per-screen `targets`, serve command),
+call `ui_init(project_dir=".")` once to detect your stack and write a real,
+inspectable `.agy-ui-scope` you can edit (it never overwrites an existing one
+unless `overwrite=True`). See `templates/agy-ui.rule.md` for a copy-paste rule
+block that teaches your agent how to use this MCP correctly.
+
+The Chromium browser **auto-installs on first use** (a one-time download; no
+manual `playwright install chromium` step). Set `AGY_UI_CHROME_CHANNEL=chrome`
+to reuse an already-installed Chrome and skip that download entirely.
 
 ## Wire into Claude Code
 
@@ -248,8 +292,13 @@ command = "agy-ui-mcp"        # or: command = "python", args = ["-m", "agy_ui_mc
 
 ## Configure a project
 
-Drop a `.agy-ui-scope` (YAML) in the target project's root. Copy the fully
-annotated template and edit it for your stack:
+A `.agy-ui-scope` file is **optional** - without one the server auto-detects your
+stack and synthesizes a scope (see "Zero-config quick start" above). Add a real
+file only when you want to customize the allow/deny globs, serve command, or
+per-screen `targets`. The easiest way is `ui_init(project_dir=".")`, which
+detects your stack and writes a starter `.agy-ui-scope` you can then edit.
+
+Alternatively, copy the fully annotated template and edit it for your stack:
 
 ```bash
 cp .agy-ui-scope.example /path/to/your/app/.agy-ui-scope
@@ -298,6 +347,16 @@ See `.agy-ui-scope.example` for the full set of options (per-target
 
 ## Tool reference
 
+> **Zero-config:** every tool works with no `.agy-ui-scope` present - the server
+> auto-detects your stack (Vite/React, Next.js, Expo, Ionic, CRA, Flutter-web, or
+> generic web) and synthesizes a scope for the run.
+
+**`ui_init(project_dir=".", overwrite=False)`** -> detects your stack and writes a
+starter `.agy-ui-scope` (never clobbers an existing one unless `overwrite=True`).
+Returns `status` (`ok`/`exists`/`error`), `scope_path`, `written`,
+`detected` (`{framework, platform, serve_cmd, serve_url, package_manager}`),
+`allow`, `deny`, `design_dir_found`, `next_steps`, and `warnings`.
+
 **`ui_implement(project_dir, task, design_refs=None, target_route=None,
 max_iters=4, apply=True, match_threshold=90)`** → returns `files_changed`,
 `diff`, `escalations`, `iterations`, `shots_before`/`shots_after`, `targets`,
@@ -318,8 +377,11 @@ when a native/in-place run can't be made safe (non-git or no commit yet) - the
   safety snapshot). A dirty working tree is fine and is preserved; only a
   non-git or commit-less project is refused (with a clear message). Web runs use
   an isolated worktree and also require git.
-- **Playwright browsers are separate.** Web and a11y features need
-  `playwright install chromium`; native-only use does not.
+- **Playwright Chromium auto-installs.** Web and a11y features need a Chromium
+  browser; the server installs it automatically on first use (a one-time
+  download, with a short stderr notice). Set `AGY_UI_CHROME_CHANNEL=chrome` to
+  reuse an installed Chrome/Edge and skip the download, or
+  `AGY_UI_NO_BROWSER_AUTOINSTALL=1` to opt out. Native-only use needs no browser.
 - **Native serve command is argv-split** (`shlex.split`, no shell) so the PTY
   can deliver `r`/`R`/`q` keystrokes to `flutter` directly - shell features
   (`&&`, env-var expansion, `cd`) in `serve.cmd` won't work for native.
@@ -328,6 +390,15 @@ when a native/in-place run can't be made safe (non-git or no commit yet) - the
 - **Flutter scaffolding.** If `flutter run` reports a missing `ios/` or
   `android/` project, regenerate it with `flutter create --platforms=ios .`
   (or `android`).
+
+## Environment variables
+
+| Variable | Effect |
+|---|---|
+| `AGY_UI_CHROME_CHANNEL` | Use an installed browser channel (e.g. `chrome` or `msedge`) instead of Playwright's bundled Chromium. Skips the one-time Chromium download. |
+| `AGY_UI_CHROME_EXECUTABLE` | Explicit path to a Chromium-based browser executable to launch. |
+| `AGY_UI_NO_BROWSER_AUTOINSTALL` | Set to a truthy value to disable the automatic `playwright install chromium` on first use. |
+| `AGY_UI_DRY_RUN` | Skip every external side effect and return a stub payload (see below). |
 
 ## Offline / dry runs
 

@@ -4,13 +4,31 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agy-ui-mcp"
-version = "0.1.0"
+dynamic = ["version"]
 description = "MCP server that delegates frontend/UI work to the agy CLI (Gemini), scoped via a diff-gate to never touch backend/API/business logic."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
-authors = [{ name = "agy-ui-mcp authors" }]
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "qdzsh", email = "github@qdzsh.dev" }]
 keywords = ["mcp", "ui", "frontend", "gemini", "agy", "playwright"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    # NOTE: the deprecated "License :: OSI Approved :: MIT License" classifier is
+    # intentionally omitted - PEP 639 supersedes it with the SPDX `license = "MIT"`
+    # expression above, and modern setuptools rejects using both together.
+    "Operating System :: POSIX",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: User Interfaces",
+    "Topic :: Software Development :: Code Generators",
+]
 
 dependencies = [
     # Model Context Protocol server runtime (Claude Code + Codex compatible).
@@ -21,8 +39,9 @@ dependencies = [
     "pyyaml>=6,<7",
     # Glob matching for scope allow/deny/ambiguous classification.
     "pathspec>=0.12,<1",
-    # Browser automation for screenshot-based visual review. Browsers are NOT
-    # installed by this package; run `playwright install chromium` separately.
+    # Browser automation for screenshot-based visual review. The Chromium
+    # browser auto-installs on first use (or set AGY_UI_CHROME_CHANNEL=chrome
+    # to reuse an installed Chrome/Edge).
     "playwright>=1.40,<2",
 ]
 
@@ -38,9 +57,17 @@ agy-ui-mcp = "agy_ui_mcp.__main__:main"
 [project.urls]
 Homepage = "https://github.com/qdzsh/agy-ui-mcp"
 Repository = "https://github.com/qdzsh/agy-ui-mcp"
+Issues = "https://github.com/qdzsh/agy-ui-mcp/issues"
+Documentation = "https://github.com/qdzsh/agy-ui-mcp#readme"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
+
+[tool.setuptools.dynamic]
+# Single-source the version from the package so it never drifts. setuptools
+# reads the attribute statically (no import), so __version__ must be a plain
+# string literal in src/agy_ui_mcp/__init__.py.
+version = { attr = "agy_ui_mcp.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

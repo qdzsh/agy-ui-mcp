@@ -22,6 +22,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -96,6 +97,94 @@ def _import_sync_playwright():
         ) from exc
 
 
+#: Set once per process after the first auto-install attempt so the (slow) browser
+#: download is never retried more than once, even across many capture calls.
+_CHROMIUM_INSTALL_ATTEMPTED: bool = False
+
+#: Substrings (matched case-insensitively) that mark a launch failure as a missing
+#: browser binary rather than some other error. Playwright's message varies by
+#: version, so we match on any of these stable fragments.
+_MISSING_BROWSER_MARKERS: Final[tuple[str, ...]] = (
+    "executable doesn't exist",
+    "playwright install",
+    "looks like playwright",
+)
+
+
+def _launch_chromium(pw):
+    """Launch a headless Chromium browser, with convenience for non-technical users.
+
+    Reads optional environment variables to support driving a system-installed
+    browser, and (by default) auto-installs the bundled Chromium the first time a
+    launch fails because the browser binary has not been downloaded yet.
+
+    Environment variables:
+        AGY_UI_CHROME_CHANNEL: If non-empty, passed as ``channel`` (e.g. ``chrome``
+            or ``msedge``) to drive a system-installed Chrome/Edge instead of the
+            downloaded Chromium. Auto-install is skipped in this mode because a
+            chromium download cannot fix a missing system browser.
+        AGY_UI_CHROME_EXECUTABLE: If set, passed as ``executable_path`` to launch a
+            specific browser binary.
+        AGY_UI_NO_BROWSER_AUTOINSTALL: If truthy, disables the auto-install fallback.
+        AGY_UI_DRY_RUN: If truthy, disables the auto-install fallback (no side effects).
+
+    Args:
+        pw: An active ``sync_playwright`` context (the value bound by
+            ``with sync_playwright() as pw``).
+
+    Returns:
+        A launched Chromium ``Browser`` instance.
+
+    Raises:
+        Exception: Re-raises the original launch error if the browser is missing
+            and auto-install is disabled, in use of a channel, or itself fails.
+    """
+    global _CHROMIUM_INSTALL_ATTEMPTED
+
+    channel = os.environ.get("AGY_UI_CHROME_CHANNEL")
+    executable = os.environ.get("AGY_UI_CHROME_EXECUTABLE")
+
+    launch_kwargs: dict[str, object] = {"headless": True}
+    if channel:
+        launch_kwargs["channel"] = channel
+    if executable:
+        launch_kwargs["executable_path"] = executable
+
+    try:
+        return pw.chromium.launch(**launch_kwargs)
+    except Exception as exc:
+        # Only the "browser binary missing" case is recoverable by installing the
+        # bundled Chromium. A channel points at a *system* browser, so installing
+        # Chromium would not help and must propagate to the caller.
+        autoinstall_disabled = bool(
+            os.environ.get("AGY_UI_NO_BROWSER_AUTOINSTALL")
+        ) or bool(os.environ.get("AGY_UI_DRY_RUN"))
+        message = str(exc).lower()
+        is_missing_browser = any(
+            marker in message for marker in _MISSING_BROWSER_MARKERS
+        )
+        if (
+            not is_missing_browser
+            or bool(channel)
+            or autoinstall_disabled
+            or _CHROMIUM_INSTALL_ATTEMPTED
+        ):
+            raise
+
+        _CHROMIUM_INSTALL_ATTEMPTED = True
+        print(
+            "agy-ui-mcp: installing the Chromium browser for the first time, "
+            "this is a one-time setup...",
+            file=sys.stderr,
+        )
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            check=False,
+        )
+        # Retry exactly once; if it still fails, let that error propagate.
+        return pw.chromium.launch(**launch_kwargs)
+
+
 def wait_ready(url: str, timeout: int = 60) -> bool:
     """Poll ``url`` until it responds or ``timeout`` seconds elapse.
 
@@ -162,7 +251,7 @@ def capture(
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+        browser = _launch_chromium(pw)
         try:
             page = browser.new_page(
                 viewport={"width": viewport_width, "height": height}
@@ -412,7 +501,7 @@ def capture_target(
 
     with sync_playwright() as pw:
         ctx_kwargs = _build_context_kwargs(target, devices, pw)
-        browser = pw.chromium.launch(headless=True)
+        browser = _launch_chromium(pw)
         try:
             context = browser.new_context(**ctx_kwargs)
 
@@ -558,7 +647,7 @@ def audit_a11y(
 
         with sync_playwright() as pw:
             ctx_kwargs = _build_context_kwargs(target, devices, pw)
-            browser = pw.chromium.launch(headless=True)
+            browser = _launch_chromium(pw)
             try:
                 context = browser.new_context(**ctx_kwargs)
                 if target.local_storage:
