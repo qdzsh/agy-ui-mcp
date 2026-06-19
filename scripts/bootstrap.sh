@@ -13,6 +13,12 @@
 #
 set -euo pipefail
 
+# SECURITY: install from the GitHub repo as the PRIMARY (and currently only)
+# source. PyPI install is intentionally DISABLED until the `agy-ui-mcp` name is
+# both published AND reserved on PyPI: installing it from PyPI first would let a
+# name-squatter who registers the unclaimed name run arbitrary code for everyone
+# using the advertised `curl | bash` one-liner (dependency-confusion /
+# name-squatting RCE). PKG_PYPI is kept defined for when that lands.
 PKG_PYPI="agy-ui-mcp"
 PKG_GIT="git+https://github.com/qdzsh/agy-ui-mcp"
 
@@ -74,30 +80,22 @@ pipx_run() {
 }
 
 # --- 3. Install the package -------------------------------------------------
-# Try PyPI first; fall back to installing straight from the GitHub repo (useful
-# before the package is published, or for the latest main).
+# SECURITY: install straight from the GitHub repo ($PKG_GIT). PyPI ($PKG_PYPI)
+# is intentionally NOT used yet — see the note where PKG_PYPI is defined. Do not
+# re-enable the PyPI path until the name is published AND reserved on PyPI, or
+# the `curl | bash` one-liner becomes a name-squatting RCE vector.
 PLAYWRIGHT_BIN=""
 RUN_CMD="agy-ui-mcp"
 
 if [[ "$USE_PIPX" -eq 1 ]]; then
-  say "Installing $PKG_PYPI with pipx"
-  if pipx_run install --force "$PKG_PYPI"; then
-    :
-  else
-    echo "  (PyPI install failed; trying the GitHub repo instead)"
-    pipx_run install --force "$PKG_GIT"
-  fi
+  say "Installing agy-ui-mcp from GitHub with pipx"
+  pipx_run install --force "$PKG_GIT"
   VENVS="$(pipx_run environment --value PIPX_LOCAL_VENVS 2>/dev/null || echo "$HOME/.local/pipx/venvs")"
   PLAYWRIGHT_BIN="$VENVS/agy-ui-mcp/bin/playwright"
   RUN_CMD="agy-ui-mcp"
 else
-  say "Installing $PKG_PYPI with pip (--user)"
-  if python3 -m pip install --user --upgrade "$PKG_PYPI"; then
-    :
-  else
-    echo "  (PyPI install failed; trying the GitHub repo instead)"
-    python3 -m pip install --user --upgrade "$PKG_GIT"
-  fi
+  say "Installing agy-ui-mcp from GitHub with pip (--user)"
+  python3 -m pip install --user --upgrade "$PKG_GIT"
   PLAYWRIGHT_BIN="$(command -v playwright || true)"
   # The user-site bin may not be on PATH yet; prefer the console script if found.
   if command -v agy-ui-mcp >/dev/null 2>&1; then

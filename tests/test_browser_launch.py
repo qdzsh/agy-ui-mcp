@@ -175,3 +175,23 @@ def test_channel_skips_auto_install(monkeypatch):
 
     # A channel drives a system browser, so installing Chromium would not help.
     assert recorded == []
+
+
+def test_executable_skips_auto_install(monkeypatch):
+    monkeypatch.setenv("AGY_UI_CHROME_EXECUTABLE", "/path/to/missing-chrome")
+    recorded: list[Any] = []
+    monkeypatch.setattr(
+        screenshot.subprocess, "run", lambda *a, **k: recorded.append(a)
+    )
+
+    pw = _FakePw([Exception(_MISSING_MSG)])
+
+    with pytest.raises(Exception, match="Executable doesn't exist"):
+        screenshot._launch_chromium(pw)
+
+    # A user-specified executable cannot be fixed by a Chromium download (and the
+    # retry would only reuse the same bad path), so install must NOT be invoked
+    # and the original launch error propagates.
+    assert recorded == []
+    # Only the single failing launch was attempted (no post-install retry).
+    assert len(pw.chromium.calls) == 1

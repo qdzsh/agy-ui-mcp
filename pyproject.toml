@@ -1,5 +1,7 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+# PEP 639 (`license = "MIT"` + `license-files`) support landed in setuptools 77,
+# so the floor must be >=77 — an older setuptools would reject the metadata below.
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]

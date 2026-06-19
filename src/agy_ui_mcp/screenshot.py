@@ -124,7 +124,9 @@ def _launch_chromium(pw):
             downloaded Chromium. Auto-install is skipped in this mode because a
             chromium download cannot fix a missing system browser.
         AGY_UI_CHROME_EXECUTABLE: If set, passed as ``executable_path`` to launch a
-            specific browser binary.
+            specific browser binary. Auto-install is skipped in this mode too: a
+            chromium download cannot fix a user-specified path, and retrying would
+            only reuse the same bad path.
         AGY_UI_NO_BROWSER_AUTOINSTALL: If truthy, disables the auto-install fallback.
         AGY_UI_DRY_RUN: If truthy, disables the auto-install fallback (no side effects).
 
@@ -154,8 +156,10 @@ def _launch_chromium(pw):
         return pw.chromium.launch(**launch_kwargs)
     except Exception as exc:
         # Only the "browser binary missing" case is recoverable by installing the
-        # bundled Chromium. A channel points at a *system* browser, so installing
-        # Chromium would not help and must propagate to the caller.
+        # bundled Chromium. A channel points at a *system* browser, and an
+        # explicit executable_path points at a user-specified binary, so in
+        # either case installing Chromium would not help (the retry would just
+        # reuse the same bad path) and the error must propagate to the caller.
         autoinstall_disabled = bool(
             os.environ.get("AGY_UI_NO_BROWSER_AUTOINSTALL")
         ) or bool(os.environ.get("AGY_UI_DRY_RUN"))
@@ -166,6 +170,7 @@ def _launch_chromium(pw):
         if (
             not is_missing_browser
             or bool(channel)
+            or bool(executable)
             or autoinstall_disabled
             or _CHROMIUM_INSTALL_ATTEMPTED
         ):

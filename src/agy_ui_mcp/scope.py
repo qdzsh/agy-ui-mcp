@@ -342,17 +342,72 @@ FrameworkLabel = Literal[
     "flutter", "expo", "ionic", "next", "vite-react", "cra", "generic-web", "unknown"
 ]
 
-#: Deny globs shared by every web/expo/ionic/next profile — backend, API,
-#: server-only, route handlers, tests, and vendored deps are always off-limits.
-_WEB_DENY: Final[list[str]] = [
+#: Extension-agnostic backend/business-logic locations that must NEVER be
+#: editable by the zero-config defaults. The CORE GUARANTEE of this server is
+#: that it only touches FE/UI; the auto-synthesized scope leans on this list so
+#: common backend/logic directories (API routes, server code, data/db layers,
+#: services, server actions, route/middleware handlers, models, etc.) stay
+#: off-limits even when they sit inside an otherwise-allowed glob like
+#: ``src/**/*.tsx``. ``classify_path`` gives ``deny`` precedence over ``allow``,
+#: so any path matching one of these is reverted regardless of the allow globs.
+_BACKEND_DENY: Final[list[str]] = [
     "**/api/**",
     "**/server/**",
+    "backend/**",
+    "server/**",
     "**/*.server.*",
     "**/route.ts",
     "**/route.js",
+    "**/route.tsx",
+    "**/middleware.*",
+    "**/services/**",
+    "**/service/**",
+    "**/repositories/**",
+    "**/repository/**",
+    "**/db/**",
+    "**/database/**",
+    "**/prisma/**",
+    "**/models/**",
+    "**/model/**",
+    "**/actions/**",
+    "**/functions/**",
+]
+
+#: Deny globs shared by every web/expo/ionic/next profile — the backend/logic
+#: locations above plus tests and vendored deps are always off-limits.
+_WEB_DENY: Final[list[str]] = _BACKEND_DENY + [
     "**/*.test.*",
     "**/*.spec.*",
     "**/node_modules/**",
+]
+
+#: Flutter-specific deny globs. Flutter keeps all Dart under ``lib/``, so the
+#: extension-agnostic ``_BACKEND_DENY`` (tuned for JS/TS layouts) does not apply;
+#: instead we carve the common logic/state/data/network directories out of the
+#: broad ``lib/**/*.dart`` allow so widgets/screens/theme stay editable while
+#: business logic does not.
+_FLUTTER_DENY: Final[list[str]] = [
+    "test/**",
+    "lib/services/**",
+    "lib/service/**",
+    "lib/repositories/**",
+    "lib/repository/**",
+    "lib/data/**",
+    "lib/models/**",
+    "lib/model/**",
+    "lib/providers/**",
+    "lib/provider/**",
+    "lib/bloc/**",
+    "lib/cubit/**",
+    "lib/api/**",
+    "lib/network/**",
+    "lib/db/**",
+    "lib/database/**",
+    "lib/domain/**",
+    "lib/usecases/**",
+    "lib/usecase/**",
+    "lib/state/**",
+    "lib/store/**",
 ]
 
 #: Allow globs for a generic Vite-style web app (also reused by the generic
@@ -458,6 +513,22 @@ def _customize_hint() -> str:
     )
 
 
+def _safety_hint() -> str:
+    """Warn that the zero-config safety scope is a best-effort guess.
+
+    The synthesized deny globs cover common backend/logic layouts, but cannot
+    know a project's non-standard structure. Tell the user to run ``ui_init`` to
+    review and tighten the deny globs so backend/business logic stays off-limits.
+    """
+    return (
+        "SAFETY: this zero-config edit scope is a best-effort guess at which "
+        "files are pure FE/UI; it cannot reliably detect a non-standard backend "
+        "layout. Before trusting it, run the `ui_init` tool to review and "
+        "tighten the deny globs so your API/server/business-logic files stay "
+        "off-limits."
+    )
+
+
 def synthesize_scope(project_dir: str | Path) -> tuple[AgyUiScope, list[str]]:
     """Auto-detect the stack and build a zero-config :class:`AgyUiScope`.
 
@@ -491,12 +562,12 @@ def synthesize_scope(project_dir: str | Path) -> tuple[AgyUiScope, list[str]]:
                 ready_timeout=120,
             ),
             allow=["lib/**/*.dart"],
-            deny=["test/**"],
+            deny=list(_FLUTTER_DENY),
             ambiguous=[],
         )
         warnings.append(
             "No .agy-ui-scope found; detected a Flutter project (pubspec.yaml) "
-            "and used zero-config flutter-web defaults. " + hint
+            "and used zero-config flutter-web defaults. " + _safety_hint() + " " + hint
         )
         return scope, warnings
 
@@ -505,7 +576,8 @@ def synthesize_scope(project_dir: str | Path) -> tuple[AgyUiScope, list[str]]:
         scope = _generic_web_scope()
         warnings.append(
             "No .agy-ui-scope and no package.json/pubspec.yaml found; used "
-            "generic web defaults (Vite-style, http://localhost:5173). " + hint
+            "generic web defaults (Vite-style, http://localhost:5173). "
+            + _safety_hint() + " " + hint
         )
         return scope, warnings
 
@@ -527,13 +599,19 @@ def synthesize_scope(project_dir: str | Path) -> tuple[AgyUiScope, list[str]]:
                 url="http://localhost:19006",
                 ready_timeout=60,
             ),
-            allow=["**/*.tsx", "**/*.jsx", "app/**/*.tsx"],
+            allow=[
+                "app/**/*.tsx",
+                "app/**/*.jsx",
+                "components/**",
+                "src/**/*.tsx",
+                "src/**/*.jsx",
+            ],
             deny=list(_WEB_DENY),
             ambiguous=[],
         )
         warnings.append(
             "No .agy-ui-scope found; detected an Expo project and used "
-            "zero-config expo-web defaults. " + hint
+            "zero-config expo-web defaults. " + _safety_hint() + " " + hint
         )
         return scope, warnings
 
@@ -553,7 +631,7 @@ def synthesize_scope(project_dir: str | Path) -> tuple[AgyUiScope, list[str]]:
         )
         warnings.append(
             "No .agy-ui-scope found; detected an Ionic project and used "
-            "zero-config ionic defaults. " + hint
+            "zero-config ionic defaults. " + _safety_hint() + " " + hint
         )
         return scope, warnings
 
@@ -567,27 +645,33 @@ def synthesize_scope(project_dir: str | Path) -> tuple[AgyUiScope, list[str]]:
                 url="http://localhost:3000",
                 ready_timeout=60,
             ),
+            # Next.js Server Components / Server Actions commonly live in
+            # `app/**/*.tsx`, so those are NOT silently allowed; only pure
+            # presentational components and styles are. Page/layout/server-prone
+            # files go to `ambiguous` (reverted AND reported) so a human decides.
             allow=[
-                "app/**/*.tsx",
-                "app/**/*.jsx",
                 "components/**",
-                "src/**/*.tsx",
-                "src/**/*.jsx",
-                "src/**/*.css",
-                "src/**/*.scss",
+                "src/components/**",
+                "**/*.css",
+                "**/*.scss",
                 "**/*.module.css",
             ],
             deny=list(_WEB_DENY),
             ambiguous=[
+                "app/**/*.tsx",
+                "app/**/*.jsx",
+                "src/app/**/*.tsx",
+                "src/app/**/*.jsx",
+                "pages/**/*.tsx",
+                "pages/**/*.jsx",
                 "app/layout.tsx",
-                "app/layout.jsx",
                 "next.config.*",
-                "src/app/layout.tsx",
             ],
         )
         warnings.append(
             "No .agy-ui-scope found; detected a Next.js project and used "
-            "zero-config web defaults (http://localhost:3000). " + hint
+            "zero-config web defaults (http://localhost:3000). "
+            + _safety_hint() + " " + hint
         )
         return scope, warnings
 
@@ -607,7 +691,8 @@ def synthesize_scope(project_dir: str | Path) -> tuple[AgyUiScope, list[str]]:
         )
         warnings.append(
             "No .agy-ui-scope found; detected a Vite project and used "
-            "zero-config web defaults (http://localhost:5173). " + hint
+            "zero-config web defaults (http://localhost:5173). "
+            + _safety_hint() + " " + hint
         )
         return scope, warnings
 
@@ -627,7 +712,8 @@ def synthesize_scope(project_dir: str | Path) -> tuple[AgyUiScope, list[str]]:
         )
         warnings.append(
             "No .agy-ui-scope found; detected a Create React App project and "
-            "used zero-config web defaults (http://localhost:3000). " + hint
+            "used zero-config web defaults (http://localhost:3000). "
+            + _safety_hint() + " " + hint
         )
         return scope, warnings
 
@@ -636,7 +722,7 @@ def synthesize_scope(project_dir: str | Path) -> tuple[AgyUiScope, list[str]]:
     warnings.append(
         "No .agy-ui-scope found; could not identify the framework from "
         "package.json, used generic web defaults (http://localhost:5173). "
-        + hint
+        + _safety_hint() + " " + hint
     )
     return scope, warnings
 

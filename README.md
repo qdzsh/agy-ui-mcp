@@ -217,18 +217,34 @@ Claude Code:
 curl -fsSL https://raw.githubusercontent.com/qdzsh/agy-ui-mcp/main/scripts/bootstrap.sh | bash
 ```
 
-### From PyPI
+### From GitHub (recommended)
+
+The package is installed straight from the GitHub repo. (PyPI is intentionally
+not used yet for security reasons; see "From PyPI" below.)
 
 ```bash
 # 1. Install the server (gives you an `agy-ui-mcp` command on PATH)
-pipx install agy-ui-mcp
-# or: uv tool install agy-ui-mcp
-# Not published yet / want the latest main? Use the repo as a fallback:
-#   pipx install git+https://github.com/qdzsh/agy-ui-mcp
+pipx install git+https://github.com/qdzsh/agy-ui-mcp
+# or: uv tool install git+https://github.com/qdzsh/agy-ui-mcp
 
 # 2. Register it with Claude Code
 claude mcp add agy-ui --scope user -- agy-ui-mcp
 ```
+
+### From PyPI (future, once published)
+
+PyPI install is **not** available yet: the `agy-ui-mcp` name is not yet
+published and reserved on PyPI, and installing an unclaimed name first would be
+a name-squatting risk. Once the name is published and reserved, you will be able
+to run:
+
+```bash
+# Available only AFTER the package is published + reserved on PyPI.
+pipx install agy-ui-mcp
+# or: uv tool install agy-ui-mcp
+```
+
+Until then, use the GitHub install above (or the one-liner, which is git-backed).
 
 The Chromium browser auto-installs on first use, so there is no manual
 `playwright install chromium` step. (To reuse an already-installed Chrome and

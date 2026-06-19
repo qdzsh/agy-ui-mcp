@@ -16,6 +16,7 @@ import pytest
 
 from agy_ui_mcp import scope as scope_mod
 from agy_ui_mcp import server
+from agy_ui_mcp.policy_builder import classify_path
 from agy_ui_mcp.scope import (
     DEFAULT_MODEL,
     SCOPE_FILENAME,
@@ -108,6 +109,15 @@ def test_synthesize_next(tmp_path: Path) -> None:
     assert scope.serve is not None
     assert "3000" in scope.serve.url
     assert "**/api/**" in scope.deny
+    # Server Components / Server Actions live in app/**/*.tsx, so those are NOT
+    # silently allowed; only presentational components/styles are.
+    assert "components/**" in scope.allow
+    assert "**/*.css" in scope.allow
+    assert "app/**/*.tsx" not in scope.allow
+    assert "src/**/*.tsx" not in scope.allow
+    # Page/layout/server-prone files are ambiguous (reverted AND reported).
+    assert "app/**/*.tsx" in scope.ambiguous
+    assert "pages/**/*.tsx" in scope.ambiguous
     assert warnings
 
 
@@ -120,6 +130,10 @@ def test_synthesize_flutter(tmp_path: Path) -> None:
     assert "5000" in scope.serve.url
     assert scope.serve.ready_timeout == 120
     assert "lib/**/*.dart" in scope.allow
+    # Logic/data/state directories under lib/ are carved out of the broad allow.
+    assert "lib/services/**" in scope.deny
+    assert "lib/models/**" in scope.deny
+    assert "lib/bloc/**" in scope.deny
     assert warnings
 
 
@@ -131,6 +145,11 @@ def test_synthesize_expo(tmp_path: Path) -> None:
     assert scope.serve is not None
     assert "19006" in scope.serve.url
     assert scope.serve.cmd == "npx expo start --web"
+    # No repo-wide allow: only screen/component-scoped globs are editable.
+    assert "**/*.tsx" not in scope.allow
+    assert "app/**/*.tsx" in scope.allow
+    assert "components/**" in scope.allow
+    assert "**/api/**" in scope.deny
     assert warnings
 
 
@@ -190,6 +209,76 @@ def test_yarn_omits_run_keyword(tmp_path: Path) -> None:
     scope, _ = synthesize_scope(tmp_path)
     assert scope.serve is not None
     assert scope.serve.cmd == "yarn dev"
+
+
+# --- safety: backend/logic paths are NOT allowed by zero-config defaults -----
+#
+# The CORE GUARANTEE of this server is that it never edits backend/API/business
+# logic. These tests drive `classify_path` (the same classifier the diff-gate
+# uses) to prove that representative backend/logic paths are denied/ambiguous
+# (never "allow") for each synthesized framework profile, while representative
+# pure-UI paths stay editable.
+
+
+def test_flutter_safety_logic_paths_not_allowed(tmp_path: Path) -> None:
+    _flutter_project(tmp_path)
+    scope, _ = synthesize_scope(tmp_path)
+
+    # Business logic / data / state under lib/ is denied.
+    assert classify_path(scope, "lib/services/payments.dart") == "deny"
+    assert classify_path(scope, "lib/repositories/user_repo.dart") == "deny"
+    assert classify_path(scope, "lib/data/api_client.dart") == "deny"
+    assert classify_path(scope, "lib/models/order.dart") == "deny"
+    assert classify_path(scope, "lib/bloc/auth_bloc.dart") == "deny"
+    # Widgets / screens / theme stay editable.
+    assert classify_path(scope, "lib/widgets/primary_button.dart") == "allow"
+    assert classify_path(scope, "lib/screens/home_screen.dart") == "allow"
+    assert classify_path(scope, "lib/theme/colors.dart") == "allow"
+
+
+def test_next_safety_server_paths_not_allowed(tmp_path: Path) -> None:
+    _next_project(tmp_path)
+    scope, _ = synthesize_scope(tmp_path)
+
+    # API routes / server code are hard-denied.
+    assert classify_path(scope, "app/api/users/route.ts") == "deny"
+    assert classify_path(scope, "src/server/auth.ts") == "deny"
+    assert classify_path(scope, "src/services/payments.tsx") == "deny"
+    assert classify_path(scope, "app/actions/checkout.ts") == "deny"
+    # Server-Component-prone pages are ambiguous (reverted AND reported).
+    assert classify_path(scope, "app/dashboard/page.tsx") == "ambiguous"
+    assert classify_path(scope, "pages/index.tsx") == "ambiguous"
+    # Pure presentational components/styles are editable.
+    assert classify_path(scope, "components/Card.tsx") == "allow"
+    assert classify_path(scope, "src/components/Nav.tsx") == "allow"
+    assert classify_path(scope, "styles/globals.css") == "allow"
+
+
+def test_vite_safety_logic_paths_not_allowed(tmp_path: Path) -> None:
+    _vite_project(tmp_path)
+    scope, _ = synthesize_scope(tmp_path)
+
+    # Logic dirs under src/ are denied even though src/**/*.tsx is allowed.
+    assert classify_path(scope, "src/services/Foo.tsx") == "deny"
+    assert classify_path(scope, "src/api/client.tsx") == "deny"
+    assert classify_path(scope, "src/db/schema.ts") == "deny"
+    # SPA components/screens stay editable.
+    assert classify_path(scope, "src/components/Button.tsx") == "allow"
+    assert classify_path(scope, "src/pages/Home.tsx") == "allow"
+
+
+def test_expo_safety_backend_paths_not_allowed(tmp_path: Path) -> None:
+    _expo_project(tmp_path)
+    scope, _ = synthesize_scope(tmp_path)
+
+    # Repo-wide backend files are not allowed (default-deny: not matched by allow).
+    assert classify_path(scope, "backend/AdminPanel.tsx") != "allow"
+    assert classify_path(scope, "server/index.tsx") != "allow"
+    # Logic dirs even inside allowed roots are denied.
+    assert classify_path(scope, "src/services/api.tsx") == "deny"
+    # Screens / components stay editable.
+    assert classify_path(scope, "app/index.tsx") == "allow"
+    assert classify_path(scope, "components/Avatar.tsx") == "allow"
 
 
 # --- detect_framework labels -------------------------------------------------

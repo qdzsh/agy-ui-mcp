@@ -114,11 +114,17 @@ def _preflight(scope: AgyUiScope, *, web: bool) -> str | None:
     if DRY_RUN:
         return None
     if shutil.which("agy") is None:
+        # NOTE: this only checks PATH presence — it cannot tell whether `agy` is
+        # logged in (no fast/reliable auth probe), so the message must not
+        # over-promise detection and should cover the "installed but not
+        # authenticated" case too.
         return (
-            "The `agy` CLI is not on your PATH. agy-ui-mcp delegates the actual "
-            "UI edits to Antigravity's `agy` CLI: install it and log in (it uses "
-            "your Antigravity subscription auth), then retry. See the "
-            "Requirements section of the README for setup."
+            "The `agy` CLI was not found on your PATH. agy-ui-mcp delegates the "
+            "actual UI edits to Antigravity's `agy` CLI, so install it first "
+            "(it uses your Antigravity subscription auth), then retry. See the "
+            "Requirements section of the README for setup. If `agy` is already "
+            "installed but you still get auth errors, log in with `agy login` "
+            "(or however Antigravity's CLI authenticates) before retrying."
         )
     if web:
         try:
