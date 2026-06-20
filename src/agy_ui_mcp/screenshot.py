@@ -18,6 +18,7 @@ Playwright page and returns structured WCAG violations. Native captures
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -26,6 +27,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -216,7 +218,27 @@ def wait_ready(url: str, timeout: int = 60) -> bool:
     return False
 
 
-def capture(
+def _run_off_event_loop(fn, *args, **kwargs):
+    """Run a sync (Playwright) callable off any running asyncio loop.
+
+    Playwright's sync API refuses to run inside a live asyncio loop. When the
+    caller is on the loop thread (e.g. an MCP tool awaited by FastMCP), run fn
+    in a worker thread that has no running loop; otherwise call it directly so
+    non-async callers and tests are unaffected.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return fn(*args, **kwargs)
+    with ThreadPoolExecutor(max_workers=1) as _ex:
+        return _ex.submit(fn, *args, **kwargs).result()
+
+
+def capture(*args, **kwargs):
+    return _run_off_event_loop(_capture_impl, *args, **kwargs)
+
+
+def _capture_impl(
     url: str,
     viewport_width: int,
     out_path: str | Path,
@@ -452,7 +474,11 @@ def _emulate_media_kwargs(target: "Target") -> dict:
     return kwargs
 
 
-def capture_target(
+def capture_target(*args, **kwargs):
+    return _run_off_event_loop(_capture_target_impl, *args, **kwargs)
+
+
+def _capture_target_impl(
     base_url: str,
     target: "Target",
     devices: dict[str, "Device"],
@@ -594,7 +620,11 @@ async () => {
 """
 
 
-def audit_a11y(
+def audit_a11y(*args, **kwargs):
+    return _run_off_event_loop(_audit_a11y_impl, *args, **kwargs)
+
+
+def _audit_a11y_impl(
     base_url: str,
     target: "Target",
     devices: dict[str, "Device"],
